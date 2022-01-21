@@ -1,11 +1,11 @@
 
 <#PSScriptInfo
 
-.VERSION 1.3.4
+.VERSION 1.3.5
 
 .GUID 2fdbeea1-7642-44e3-9c0c-258631425e36
 
-.AUTHOR Edward van Biljon and modified by Sam Drey
+.AUTHOR Edward van Biljon, modified by Sam Drey, further modified by Me
 
 .COMPANYNAME
 
@@ -38,28 +38,47 @@
     continue with the script Y/N, and the -NoConfirmation switch to bypass the confirmation dialog boxes to use the 
     script on Windows Scheduled task.
 
-.EXAMPLE
-    .\CleanExchangeLogFiles.ps1 -Days 5 -DoNotDelete
-    Will just display the folders and the total size for each folder that we may want to delete
+.INPUTS
+
+    -Days [x]               - Purge After [x] days - must not be less than ZipDays
+                              Default: 30 days
+    -DoNotDelete            - Dry Run script - No changes will be performed
+    -DeleteLodCTRBackup     - Clean up lodctr backup files
+    -NoConfirmation         - Just do it (in the immortal words of Shia)
+    -ZipDays [x]            - Zip after [x] days - must not be less than Days
+                              Default: 2 days
+    -CheckVersion           - Show current version, and validate with online URL version for available updates
+    -LogHere                - Create logs in the start in folder instead of Documents
 
 .EXAMPLE
-    .\CleanExchangeLogFiles.ps1 -Days 30
-    Will display the folders, and delete all files older than 30 days in the IIS folder and Exchange Logging directories
+    .\CleanExchangeLogFiles.ps1 -Days 5 -DoNotDelete -ZipDays 2
+    Will just display the folders and the total size for each folder that we may want to compress older than 2 days and delete zip files older than 5 days
 
 .EXAMPLE
-    .\CleanExchangeLogFiles.ps1 -Days 30 -NoConfirmation
-    To be used in Windows Scheduled tasks only as it doesn't provide user confirmation to delete files or cancel script.
+    .\CleanExchangeLogFiles.ps1 -Days 30 -ZipDays 2
+    Will display the folders, and compress all files older than 2 days, and delete zip files older than 30 days in the IIS folder and Exchange Logging directories
+
+.EXAMPLE
+    .\CleanExchangeLogFiles.ps1 -Days 30 -ZipDays 2 -NoConfirmation
+    To be used in Windows Scheduled tasks only as it doesn't provide user confirmation to compress and delete files or cancel script.
+
+.EXAMPLE
+    .\CleanExchangeLogFiles.ps1 -Days 30 -DeleteLodCTRBackup -ZipDays 2
+    Will display the folders, compress all files older than 2 days in the IIS folder and Exchange Logging directories, and delete all ZIP files older than than 30 days in the same paths
 
 .LINK
     https://gallery.technet.microsoft.com/office/Clear-Exchange-2013-Log-71abba44
     https://github.com/SammyKrosoft/Clean-Exchange-Log-Files
+    https://github.com/SethBodine/Clean-Exchange-Log-Files
 
 #>
 [CmdletBinding(DefaultParameterSetName="Exec")]
 Param(
-    [Parameter(Mandatory = $false,ParameterSetName="Exec")][int]$Days=5,
+    [Parameter(Mandatory = $false,ParameterSetName="Exec")][int]$Days=30,
+    [Parameter(Mandatory = $false,ParameterSetName="Exec")][int]$ZipDays=2,
     [Parameter(Mandatory = $false, ParameterSetName="Exec")][switch]$DoNotDelete,
     [Parameter(Mandatory = $false, ParameterSetName="Exec")][switch]$DeleteLodCTRBackup,
+    [Parameter(Mandatory = $false, ParameterSetName="Exec")][switch]$LogHere,
     [Parameter(Mandatory = $false)][switch]$NoConfirmation,
     [Parameter(Mandatory = $false,ParameterSetName="Check")][switch]$CheckVersion
     
@@ -73,8 +92,10 @@ $DebugPreference = "Continue"
 # Set Error Action to your needs
 $ErrorActionPreference = "SilentlyContinue"
 #Script Version
-$ScriptVersion = "1.3.3"
+$ScriptVersion = "1.3.5"
+$ScriptGitURL = "https://raw.githubusercontent.com/SethBodine/Clean-Exchange-Log-Files/master/CleanExchangeLogFiles.ps1"
 <# Version changes
+v1.3.5 : added zip feature (compress ahead of delete), and enhanced CheckVersion to pull from source in github, tweaked logging, and made a few messes
 v1.3.4 : added DeleteLodCTRBackup switch
 v1.3.3 : fixed issue where copy/paste text from script was messed up in Notepad.exe
 v1.3.2 : changed color of folders display (was yellow on cyan, now is dark red on cyan)
@@ -91,12 +112,16 @@ v0.1 : first script version
 #>
 
 $ScriptName = $MyInvocation.MyCommand.Name
-If ($CheckVersion) {Write-Host "SCRIPT NAME     : $ScriptName `nSCRIPT VERSION  : $ScriptVersion";exit}
+
 # Log or report file definition
-$UserDocumentsFolder = "$($env:USERPROFILE)\Documents"
-$OutputReport = "$UserDocumentsFolder\$($ScriptName)_Output_$(get-date -f yyyy-MM-dd-hh-mm-ss).csv"
+if(!($LogHere)){
+    $UserDocumentsFolder = "$($env:USERPROFILE)\Documents"
+} else {
+    $UserDocumentsFolder = (get-location).path
+}
+
 # Other Option for Log or report file definition (use one of these)
-$ScriptLog = "$UserDocumentsFolder\$($ScriptName)_Logging_$(Get-Date -Format 'dd-MMMM-yyyy-hh-mm-ss-tt').txt"
+$ScriptLog = "$UserDocumentsFolder\$($ScriptName)_Logging_$(Get-Date -Format 'yyyyMMdd-hhmm.ss').txt"
 <# ---------------------------- /SCRIPT_HEADER ---------------------------- #>
 
     #Checks if the user is in the administrator group. Warns and stops if the user is not.
@@ -105,10 +130,37 @@ if (-NOT ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdent
     Write-Host "You are not running this as local administrator. Run it again in an elevated prompt." -BackgroundColor Red; exit
 }
 
+# Check Ages
+if ($Days -lt $ZipDays) {
+    write-host "ERROR: Days to Zip ($ZipDays) is not less than Days to Delete ($days)"
+    exit 1
+}
+
 Set-Executionpolicy RemoteSigned
-#$days=5 defining 
 
 #region Functions
+
+# Compare local version with Git Version added in 1.3.5
+Function CheckOnlineVersion ([bool]$Short=$False){
+    if (!($Short)) { Write-Host "SCRIPT NAME     : $ScriptName `nSCRIPT VERSION  : $ScriptVersion" }
+    try {
+        $WebResponse = Invoke-WebRequest $ScriptGitURL 
+        $WebResponse.RawContent -match 'ScriptVersion ?= ?"(.*)"' | out-null
+        if (!($Short)) { Write-Host "GIT SCRIPT VER  :"$matches[1] }
+        if ([version]::Parse($ScriptVersion) -eq [version]::Parse($matches[1])) {
+            Write-Host "INFO: No Script Updates Available" -ForegroundColor Green
+        }
+        elseif ([version]::Parse($ScriptVersion) -gt [version]::Parse($matches[1])){
+            Write-Host "INFO: No Script Updates Available - local version is ahead - possible beta/test?" -ForegroundColor Yellow
+        }
+        elseif ([version]::Parse($ScriptVersion) -lt [version]::Parse($matches[1])) {
+            Write-Host "WARN: Script Update Available - head to $ScriptGitURL to update your local version"  -ForegroundColor Red
+        }
+    }
+    catch {
+        Write-Host "ERROR: Unable to check for online updates" -ForegroundColor Red
+    }
+}
 
 Function MsgBox {
     [CmdletBinding()]
@@ -160,37 +212,62 @@ function Write-Log
 }
 
 
-
-Function CleanLogfiles([string]$TargetFolder,[int]$DaysOld,[bool]$ListOnly=$False)
+# Updated to Include Zip feature in v1.3.5
+Function CleanLogfiles([string]$TargetFolder,[int]$ZipDaysOld,[int]$DelDaysOld,[bool]$ListOnly=$False)
 {
     write-host -debug -ForegroundColor DarkRed -BackgroundColor Cyan $TargetFolder
     if (Test-Path $TargetFolder) {
         $Now = Get-Date
-        $LastWrite = $Now.AddDays(-$daysOld)
-        Write-Log -Message "Will check all files for $TargetFolder older than $LastWrite inclusive"
+        $LastWrite = $Now.AddDays(-$ZipDaysOld)
+        $PurgeZip = $Now.AddDays(-$DelDaysOld)
+        Write-Log -Message "Will check $TargetFolder for all files older than $LastWrite, and zip files older than $Purgezip inclusive"
         Try{
             $Files = Get-ChildItem  $TargetFolder -Recurse | Where-Object {$_.Name -like "*.log" -or $_.Name -like "*.blg" -or $_.Name -like "*.etl"}  | where {$_.lastWriteTime -le "$lastwrite"} | Select-Object FullName,Length
+            $ZipFiles = Get-ChildItem  $TargetFolder -Recurse | Where-Object {$_.Name -like "*.zip"}  | where {$_.lastWriteTime -le "$PurgeZip"} | Select-Object FullName,Length
         } Catch {
             Write-Log "Issue trying to access $TargetFolder folder or subfolders - you may not have the proper rights or the folder is not in this location - please retry with elevated PowerShell console" -ForegroundColor Yellow -BackgroundColor Blue
             return
         }
         $FilesCount = $Files.Count
-        #$TotalFileSizeInKB = "{0:N0}" -f ((($Files | Measure-Object -Property Length -Sum).Sum)/1KB)
+        $ZipFilesCount = $ZipFiles.Count
         $TotalFileSizeInMB = "{0:N3}" -f ((($Files | Measure-Object -Property Length -Sum).Sum)/1MB)
         $TotalFileSizeInGB = "{0:N3}" -f ((($Files | Measure-Object -Property Length -Sum).Sum)/1GB)
-        Write-Log -Message "Found $FilesCount files in $TargetFolder ..."
-        Write-Log -Message "Total file size for that folder: $TotalFileSizeInMB MB / $TotalFileSizeInGB GB"
+        $TotalZipFileSizeInMB = "{0:N3}" -f ((($ZipFiles | Measure-Object -Property Length -Sum).Sum)/1MB)
+        $TotalZipFileSizeInGB = "{0:N3}" -f ((($ZipFiles | Measure-Object -Property Length -Sum).Sum)/1GB)
+        
+        Write-Log -Message "Found $FilesCount files to compress, and $ZipFilesCount zip files to delete in $TargetFolder"
+        Write-Log -Message "Total size of the files to compress for that folder: $TotalFileSizeInMB MB / $TotalFileSizeInGB GB"
+        Write-Log -Message "Total size of the zip files to delete for that folder: $TotalZipFileSizeInMB MB / $TotalZipFileSizeInGB GB"
         
         If (!($ListOnly)){
             $Counter = 0
             foreach ($File in $Files)
             {
                 $FullFileName = $File.FullName
-                Write-Progress -Activity "Cleaning files from $TargetFolder older than $DaysOld days" -Status "Cleaning $FullFileName" -Id 2 -ParentID 1 -PercentComplete $($Counter/$FilesCount*100)
-                Write-Log -Message "Deleting file $FullFileName" -Silent
-                Remove-Item $FullFileName -ErrorAction SilentlyContinue | out-null
+                $FullFileNameZip = ([io.path]::ChangeExtension($FullFileName, '.zip'))
+                Write-Progress -Activity "Compressing files from $TargetFolder older than $ZipDaysOld days" -Status "Compressing $FullFileName to $FullFileNameZip" -Id 2 -ParentID 1 -PercentComplete $($Counter/$FilesCount*100)
+                Write-Log -Message "Compressing file $FullFileName to $FullFileNameZip" -Silent
+                Try {
+                    Compress-Archive -Path $FullFileName -DestinationPath ([io.path]::ChangeExtension($FullFileName, '.zip')) -CompressionLevel Optimal -ErrorAction SilentlyContinue -Update
+                    Remove-Item $FullFileName -ErrorAction SilentlyContinue | out-null
+                }
+                catch {
+                    Write-Log "Issue trying to compress $FullFileName - you may not have the proper rights or the folder is not in this location - please retry with elevated PowerShell console" -ForegroundColor Yellow -BackgroundColor Blue
+                    return
+                }
                 $Counter++
              }
+
+             $Counter = 0
+             foreach ($ZipFile in $ZipFiles)
+             {
+                 $FullFileName = $ZipFile.FullName
+                 Write-Progress -Activity "Cleaning zip files from $TargetFolder older than $DelDaysOld days" -Status "Cleaning up $FullFileName" -Id 2 -ParentID 1 -PercentComplete $($Counter/$ZipFilesCount*100)
+                 Write-Log -Message "Deleting file $FullFileName" -Silent
+                 Remove-Item $FullFileName -ErrorAction SilentlyContinue | out-null
+                 $Counter++
+              }
+ 
          } Else {
             Write-Log "INFO: Read only mode, won't delete"
          }
@@ -203,6 +280,12 @@ Function CleanLogfiles([string]$TargetFolder,[int]$DaysOld,[bool]$ListOnly=$Fals
   #endregion End of Functions section
 
 #Process {
+
+    # Moved
+    If ($CheckVersion) {
+        CheckOnlineVersion   
+        exit
+    }
 
     # Determining IIS Log Directory
     $IISLogDirectory = Get-WebConfigurationProperty "/system.applicationHost/sites/siteDefaults" -name logfile.directory.value
@@ -234,9 +317,11 @@ If (!($NoConfirmation)){
     $Msg = $message + $FoldersStringsForMessageBox + $MessageBottom
     $UserResponse = Msgbox -msg $Msg -Title $title -Button OKCancel
 
-    If ($UserResponse -eq "Cancel") {Write-host "File deletion script ended by user." -BackgroundColor Green;exit}
+    If ($UserResponse -eq "Cancel") {Write-host "File deletion script ended by user." -BackgroundColor DarkRed -ForegroundColor Yellow;exit}
  }
 
+# Always list the version in
+CheckOnlineVersion -Short $True
 
 #Checking if user specified "-DoNotDelete" to determine if we run deletion in CleanLogFiles function or not...   
 If ($DoNotDelete){
@@ -246,20 +331,20 @@ If ($DoNotDelete){
 }
 
 Write-Progress -Activity "Logging cleanup" -Status "IIS Logs" -Id 1 -PercentComplete 0
-    CleanLogfiles -TargetFolder $IISLogPath -DaysOld $Days -ListOnly $ListOnlyMode
+    CleanLogfiles -TargetFolder $IISLogPath -DelDaysOld $Days -ListOnly $ListOnlyMode -ZipDaysOld $ZipDays 
 
-Write-Progress -Activity "Logging cleanup" -Status "Deleting log files from Exchange Logging" -Id 1 -PercentComplete 25
-    CleanLogfiles -TargetFolder $ExchangeLoggingPath -DaysOld $Days -ListOnly $ListOnlyMode
+Write-Progress -Activity "Logging cleanup" -Status "Compressing and Deleting log files from Exchange Logging" -Id 1 -PercentComplete 25
+    CleanLogfiles -TargetFolder $ExchangeLoggingPath -DelDaysOld $Days -ListOnly $ListOnlyMode  -ZipDaysOld $ZipDays 
 
-Write-Progress -Activity "Logging cleanup" -Status "Deleting ETL traces" -Id 1 -PercentComplete 50
-    CleanLogfiles -TargetFolder $ETLLoggingPath -DaysOld $Days -ListOnly $ListOnlyMode
+Write-Progress -Activity "Logging cleanup" -Status "Compressing and Deleting ETL traces" -Id 1 -PercentComplete 50
+    CleanLogfiles -TargetFolder $ETLLoggingPath -DelDaysOld $Days -ListOnly $ListOnlyMode -ZipDaysOld $ZipDays 
 
-Write-Progress -Activity "Logging cleanup" -Status "Deleting other ETL traces" -Id 1 -PercentComplete 75
-  CleanLogfiles -TargetFolder $ETLLoggingPath2 -DaysOld $Days -ListOnly $ListOnlyMode
+Write-Progress -Activity "Logging cleanup" -Status "Compressing and Deleting other ETL traces" -Id 1 -PercentComplete 75
+  CleanLogfiles -TargetFolder $ETLLoggingPath2 -DelDaysOld $Days -ListOnly $ListOnlyMode -ZipDaysOld $ZipDays 
 
 if ($DeleteLodCTRBackup) {
-  Write-Progress -Activity "Logging cleanup" -Status "Chose to delete LodCTRfiles" -Id 1 -PercentComplete 85
-  CleanLogfiles -TargetFolder $LodCRTBackupFolderPath -DaysOld $Days -ListOnly $ListOnlyMode
+  Write-Progress -Activity "Logging cleanup" -Status "Chose to compress and delete LodCTRfiles" -Id 1 -PercentComplete 85
+  CleanLogfiles -TargetFolder $LodCRTBackupFolderPath -DelDaysOld $Days -ListOnly $ListOnlyMode -ZipDaysOld $ZipDays 
 }
 
 
