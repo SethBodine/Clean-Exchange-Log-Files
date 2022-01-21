@@ -42,4 +42,4 @@ This will launch the script in files deletion mode immediately, without the need
 
 # Log file
 
-The script log file will be located on the user's Documents folder:
+The script log file will be located on the user's Documents folder, or if LogHere is specified, the start in folder.
