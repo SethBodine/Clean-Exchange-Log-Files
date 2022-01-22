@@ -1,7 +1,7 @@
 
 <#PSScriptInfo
 
-.VERSION 1.3.5
+.VERSION 1.3.5.2
 
 .GUID 2fdbeea1-7642-44e3-9c0c-258631425e36
 
@@ -92,23 +92,25 @@ $DebugPreference = "Continue"
 # Set Error Action to your needs
 $ErrorActionPreference = "SilentlyContinue"
 #Script Version
-$ScriptVersion = "1.3.5"
+$ScriptVersion = "1.3.5.2"
 $ScriptGitURL = "https://raw.githubusercontent.com/SethBodine/Clean-Exchange-Log-Files/master/CleanExchangeLogFiles.ps1"
 <# Version changes
-v1.3.5 : added zip feature (compress ahead of delete), and enhanced CheckVersion to pull from source in github, tweaked logging, and made a few messes
-v1.3.4 : added DeleteLodCTRBackup switch
-v1.3.3 : fixed issue where copy/paste text from script was messed up in Notepad.exe
-v1.3.2 : changed color of folders display (was yellow on cyan, now is dark red on cyan)
-v1.3.1 : renamed the script from CleanExchangeLogs.ps1 to CleanExchangeLogFiles.ps1 and added examples and completed description
-v1.3   : added -NoConfirmation switch to bypass the confirmation dialog box.
-v1.2.4 : update note with no update: script was NOT broken... GitHub Releases made downloads strip line feed/carriage return.
-v1.2.3 : fixed broken script (sorry about that)
-v1.2.2 : adapted Message Box title and message if we Read Only files or if we Delete files
-v1.2.1 : rephrasing, removed display file size in KB (keeping MB and GB only)
-v1.2 : added -DoNotDelete switch, to dump file size only without deleting
-v1.1 : fixed Logging function didn't trigger when in Cleanup function
-V1 : added $Day or -Day parameter, default 5 days ago, added logging function, progress bars, ...
-v0.1 : first script version
+v1.3.5.2: tweaked version check into logs
+v1.3.5.1: added file lock check before clean-up of files (bug-fix)
+v1.3.5  : added zip feature (compress ahead of delete), and enhanced CheckVersion to pull from source in github, tweaked logging, and made a few messes
+v1.3.4  : added DeleteLodCTRBackup switch
+v1.3.3  : fixed issue where copy/paste text from script was messed up in Notepad.exe
+v1.3.2  : changed color of folders display (was yellow on cyan, now is dark red on cyan)
+v1.3.1  : renamed the script from CleanExchangeLogs.ps1 to CleanExchangeLogFiles.ps1 and added examples and completed description
+v1.3    : added -NoConfirmation switch to bypass the confirmation dialog box.
+v1.2.4  : update note with no update: script was NOT broken... GitHub Releases made downloads strip line feed/carriage return.
+v1.2.3  : fixed broken script (sorry about that)
+v1.2.2  : adapted Message Box title and message if we Read Only files or if we Delete files
+v1.2.1  : rephrasing, removed display file size in KB (keeping MB and GB only)
+v1.2    : added -DoNotDelete switch, to dump file size only without deleting
+v1.1    : fixed Logging function didn't trigger when in Cleanup function
+V1      : added $Day or -Day parameter, default 5 days ago, added logging function, progress bars, ...
+v0.1    : first script version
 #>
 
 $ScriptName = $MyInvocation.MyCommand.Name
@@ -149,12 +151,15 @@ Function CheckOnlineVersion ([bool]$Short=$False){
         if (!($Short)) { Write-Host "GIT SCRIPT VER  :"$matches[1] }
         if ([version]::Parse($ScriptVersion) -eq [version]::Parse($matches[1])) {
             Write-Host "INFO: No Script Updates Available" -ForegroundColor Green
+            Write-Log -Message "INFO: No Script Updates Available"
         }
         elseif ([version]::Parse($ScriptVersion) -gt [version]::Parse($matches[1])){
             Write-Host "INFO: No Script Updates Available - local version is ahead - possible beta/test?" -ForegroundColor Yellow
+            Write-Log -Message "INFO: No Script Updates Available - local version is ahead - possible beta/test?"
         }
         elseif ([version]::Parse($ScriptVersion) -lt [version]::Parse($matches[1])) {
             Write-Host "WARN: Script Update Available - head to $ScriptGitURL to update your local version"  -ForegroundColor Red
+            Write-Log -Message "WARN: Script Update Available - head to $ScriptGitURL to update your local version"
         }
     }
     catch {
@@ -245,18 +250,28 @@ Function CleanLogfiles([string]$TargetFolder,[int]$ZipDaysOld,[int]$DelDaysOld,[
             {
                 $FullFileName = $File.FullName
                 $FullFileNameZip = ([io.path]::ChangeExtension($FullFileName, '.zip'))
-                Write-Progress -Activity "Compressing files from $TargetFolder older than $ZipDaysOld days" -Status "Compressing $FullFileName to $FullFileNameZip" -Id 2 -ParentID 1 -PercentComplete $($Counter/$FilesCount*100)
-                Write-Log -Message "Compressing file $FullFileName to $FullFileNameZip" -Silent
-                Try {
-                    Compress-Archive -Path $FullFileName -DestinationPath ([io.path]::ChangeExtension($FullFileName, '.zip')) -CompressionLevel Optimal -ErrorAction SilentlyContinue -Update
-                    Remove-Item $FullFileName -ErrorAction SilentlyContinue | out-null
+
+                # Add check for locked file
+                try { 
+                    [IO.File]::OpenWrite($FullFileName).close()
+                
+                    Write-Progress -Activity "Compressing files from $TargetFolder older than $ZipDaysOld days" -Status "Compressing $FullFileName to $FullFileNameZip" -Id 2 -ParentID 1 -PercentComplete $($Counter/$FilesCount*100)
+                    Write-Log -Message "Compressing file $FullFileName to $FullFileNameZip" -Silent
+                    Try {
+                        Compress-Archive -Path $FullFileName -DestinationPath ([io.path]::ChangeExtension($FullFileName, '.zip')) -CompressionLevel Optimal -ErrorAction SilentlyContinue -Update
+                        Remove-Item $FullFileName -ErrorAction SilentlyContinue | out-null
+                    }
+                    catch {
+                        Write-Log "Issue trying to compress $FullFileName - you may not have the proper rights or the folder is not in this location - please retry with elevated PowerShell console" -ForegroundColor Yellow -BackgroundColor Blue
+                        return
+                    }
                 }
                 catch {
-                    Write-Log "Issue trying to compress $FullFileName - you may not have the proper rights or the folder is not in this location - please retry with elevated PowerShell console" -ForegroundColor Yellow -BackgroundColor Blue
-                    return
+                    Write-Log -Message "Unable to Compress file $FullFileName to $FullFileNameZip - File is Locked by another process" -Silent
                 }
+
                 $Counter++
-             }
+            }
 
              $Counter = 0
              foreach ($ZipFile in $ZipFiles)
